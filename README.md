@@ -18,6 +18,74 @@ The pipeline implements a three-tier Medallion architecture:
   - 01_raw_to_bronze.py: Ingests raw batch folders into the Bronze Delta table with schema drift detection and corrupt record tracking.
   - 02_bronze_to_silver.py: Flattens structures, validates records, extracts clean station metadata, normalizes pollutant units, and merges into Silver tables.
 
+## Environment Setup and Execution Guide
+
+Follow these steps to set up and run the pipeline in Databricks:
+
+### 1. Workspace Configuration and Repository Import
+- Open Databricks and navigate to Workspace.
+- Select Create, choose Git folder, and paste the repository URL: https://github.com/aliyahrasheed/air-quality-pipeline-
+- Ensure the folder contains notebooks 00_config_helpers, 01_raw_to_bronze, and 02_bronze_to_silver.
+
+### 2. Unity Catalog Schema and Volume Setup
+- Navigate to Catalog, select workspace, and create a schema named air_quality.
+- Inside the air_quality schema, create a managed Volume named landing.
+- The volume target root will be: /Volumes/workspace/air_quality/landing/raw
+
+### 3. Raw Data Landing
+- Upload the raw archive (raw.zip) directly into the landing volume.
+- Unpack the archive into the landing directory using Serverless compute or an active cluster:
+  ```python
+  import zipfile
+  base = "/Volumes/workspace/air_quality/landing"
+  dbutils.fs.rm(f"{base}/raw", recurse=True)
+  with zipfile.ZipFile(f"{base}/raw.zip") as z:
+      z.extractall(base)
+  ```
+- Confirm the contents exist under:
+  - /Volumes/workspace/air_quality/landing/raw/full_load/
+  - /Volumes/workspace/air_quality/landing/raw/incremental/
+
+### 4. Running Bronze Ingestion (01_raw_to_bronze)
+- Attach the notebook to Serverless compute.
+- Run the full load ingestion:
+  - Set parameter load_type to full_load
+  - Set parameter run_mode to pending
+  - Execute Run All (processes 10 batches, total 13,000 records).
+- Run the incremental ingestion:
+  - Set parameter load_type to incremental
+  - Set parameter run_mode to pending
+  - Execute Run All (processes 3 batches, total 378 records).
+- Verify total row count:
+  ```sql
+  SELECT COUNT(*) FROM workspace.air_quality.bronze_readings;
+  -- Expected count: 13378
+  ```
+
+### 5. Running Silver Transformations (02_bronze_to_silver)
+- Run full load promotion:
+  - Set parameter load_type to full_load
+  - Set parameter run_mode to pending
+  - Execute Run All (processes 10 batches into silver_readings and silver_stations).
+- Run incremental load promotion:
+  - Set parameter load_type to incremental
+  - Set parameter run_mode to pending
+  - Execute Run All (processes 3 batches).
+- Verify Silver tables:
+  ```sql
+  SELECT COUNT(*) FROM workspace.air_quality.silver_readings;
+  -- Expected count: 13378
+
+  SELECT COUNT(*) FROM workspace.air_quality.silver_stations;
+  -- Expected count: 13
+
+  SELECT COUNT(*) FROM workspace.air_quality.silver_quarantine;
+  -- Expected count: 0
+  ```
+- Idempotency test:
+  - Set run_mode to backfill and re-run any batch.
+  - Confirm row count remains 13,378 and inserted count is 0 in the execution log.
+
 ## Data Layers and Tables
 
 ### Catalog and Schema
