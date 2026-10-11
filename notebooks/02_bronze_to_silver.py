@@ -213,44 +213,44 @@ def process_silver_batch(run_id, batch_name):
         # ── 2. Flatten & cast (all fields; use try_cast for non-nullable targets) ───
         flat = bronze.select(
             # Keys / identifiers
-            F.try_cast(F.col("_sensor_id"),   LongType()).alias("sensor_id"),
-            F.try_cast(F.col("_location_id"), LongType()).alias("location_id"),
+            F.expr("try_cast(_sensor_id AS bigint)").alias("sensor_id"),
+            F.expr("try_cast(_location_id AS bigint)").alias("location_id"),
             F.col("_location_name").alias("location_name"),
             F.col("_city").alias("city"),
             F.col("_country").alias("country"),
 
             # Parameter block
-            F.try_cast(F.col("parameter.id"),          LongType()).alias("parameter_id"),
+            F.expr("try_cast(parameter.id AS bigint)").alias("parameter_id"),
             F.col("parameter.name").alias("parameter_name"),
             F.col("parameter.displayName").alias("parameter_display_name"),
             F.col("parameter.units").alias("unit_raw"),
 
             # Period timestamps
-            F.try_cast(F.col("period.datetimeFrom.utc"), TimestampType()).alias("datetime_from_utc"),
+            F.expr("try_cast(period.datetimeFrom.utc AS timestamp)").alias("datetime_from_utc"),
             F.col("period.datetimeFrom.local").alias("datetime_from_local"),
-            F.try_cast(F.col("period.datetimeTo.utc"),   TimestampType()).alias("datetime_to_utc"),
+            F.expr("try_cast(period.datetimeTo.utc AS timestamp)").alias("datetime_to_utc"),
             F.col("period.datetimeTo.local").alias("datetime_to_local"),
             F.col("period.label").alias("period_label"),
             F.col("period.interval").alias("period_interval"),
 
             # Measurement value
-            F.try_cast(F.col("value"), DoubleType()).alias("value_raw"),
+            F.expr("try_cast(value AS double)").alias("value_raw"),
 
             # Flags
-            F.try_cast(F.col("flagInfo.hasFlags"), "boolean").alias("has_flags"),
+            F.expr("try_cast(flagInfo.hasFlags AS boolean)").alias("has_flags"),
 
             # Coordinates
-            F.try_cast(F.col("coordinates.latitude"),  DoubleType()).alias("latitude"),
-            F.try_cast(F.col("coordinates.longitude"), DoubleType()).alias("longitude"),
+            F.expr("try_cast(coordinates.latitude AS double)").alias("latitude"),
+            F.expr("try_cast(coordinates.longitude AS double)").alias("longitude"),
 
             # Summary statistics
-            F.try_cast(F.col("summary.min"),    DoubleType()).alias("summary_min"),
-            F.try_cast(F.col("summary.max"),    DoubleType()).alias("summary_max"),
-            F.try_cast(F.col("summary.avg"),    DoubleType()).alias("summary_avg"),
-            F.try_cast(F.col("summary.median"), DoubleType()).alias("summary_median"),
+            F.expr("try_cast(summary.min AS double)").alias("summary_min"),
+            F.expr("try_cast(summary.max AS double)").alias("summary_max"),
+            F.expr("try_cast(summary.avg AS double)").alias("summary_avg"),
+            F.expr("try_cast(summary.median AS double)").alias("summary_median"),
 
             # Coverage
-            F.try_cast(F.col("coverage.percentCoverage"), DoubleType()).alias("coverage_pct"),
+            F.expr("try_cast(coverage.percentCoverage AS double)").alias("coverage_pct"),
 
             # Passthrough for quarantine routing
             F.col("_corrupt_record"),
