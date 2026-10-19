@@ -107,13 +107,17 @@ def discover_new_keys(files_glob):
     each line is read as text and we only list its keys) and return those that are not in
     our expected schema. These are 'drifted' columns.
     """
-    keys = (
-        spark.read.text(files_glob)
-             .select(F.explode(F.map_keys(F.from_json("value", MapType(StringType(), StringType())))).alias("k"))
-             .distinct()
-    )
-    found = {r["k"] for r in keys.collect()}
-    return sorted(found - set(EXPECTED_KEYS))
+    try:
+        keys = (
+            spark.read.text(files_glob)
+                 .select(F.explode(F.map_keys(F.from_json("value", MapType(StringType(), StringType())))).alias("k"))
+                 .distinct()
+        )
+        found = {r["k"] for r in keys.collect() if r["k"] is not None}
+        return sorted(found - set(EXPECTED_KEYS))
+    except Exception as e:
+        print(f"Warning: discover_new_keys encountered an error ({e}); using base schema.")
+        return []
 
 
 def build_read_schema(new_keys=()):

@@ -1,0 +1,5 @@
+# Antigravity & Agent files
+CLAUDE.md
+.gemini/
+*.pyc
+__pycache__/

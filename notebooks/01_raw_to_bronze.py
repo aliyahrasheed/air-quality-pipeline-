@@ -45,7 +45,7 @@ def process_bronze_batch(run_id, batch_name):
     """Ingest ONE batch folder into Bronze and write ONE audit row. Returns True on success."""
     start_time = datetime.now(timezone.utc)
     batch_path = f"{VOLUME_ROOT}/{load_type}/{batch_name}"
-    files_glob = f"{batch_path}/*.jsonl"
+    files_glob = f"{batch_path}/*.json*"
     try:
         # 1) schema drift: which top-level keys are NOT in our expected schema?
         new_keys = discover_new_keys(files_glob)
