@@ -164,6 +164,10 @@ try:
 
 except Exception as e:
     err = str(e)
+    if "401" in err or "Unauthorized" in err:
+        print("NOTICE: OpenAQ API v3 requires a free API key (register at https://openaq.org).")
+        print("Please provide your API key in the 'api_key' widget.")
+        print("Alternatively, per TA guidelines, use the manual landing zone batch upload approach (raw.zip).")
     print(f"API-to-Landing Failure: {err}")
     log_run(run_id, batch_name, "API-to-Landing", "incremental", "live_api",
             params, target_file, start_time, "FAILURE", error_message=err)
