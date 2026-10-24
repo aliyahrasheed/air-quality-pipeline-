@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # 02 - Bronze to Silver
 # MAGIC Reads from `bronze_readings` batch by batch (in sorted order), flattens nested columns,
@@ -490,3 +494,20 @@ if failed:
 # MAGIC FROM   workspace.air_quality.pipeline_execution_logs
 # MAGIC ORDER  BY start_time DESC
 # MAGIC LIMIT  40
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT COUNT(*) AS silver_rows
+# MAGIC FROM workspace.air_quality.silver_readings;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT 'Bronze' AS layer, COUNT(*) AS total_rows
+# MAGIC FROM workspace.air_quality.bronze_readings
+# MAGIC
+# MAGIC UNION ALL
+# MAGIC
+# MAGIC SELECT 'Silver' AS layer, COUNT(*) AS total_rows
+# MAGIC FROM workspace.air_quality.silver_readings;

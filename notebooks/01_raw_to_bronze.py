@@ -161,3 +161,116 @@ if failed:
 
 # MAGIC %sql
 # MAGIC SELECT batch_id, COUNT(*) AS n FROM workspace.air_quality.bronze_readings GROUP BY batch_id ORDER BY batch_id
+
+# COMMAND ----------
+
+print("Full-load batches:")
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/full_load"))
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/"))
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/"))
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/incremental/"))
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/incremental/batch_20190616_093357/"))
+
+# COMMAND ----------
+
+file_path = "/Volumes/workspace/air_quality/landing/raw/incremental/batch_20190616_093357/openaq_batch_20190616_093357.jsonl"
+
+df = spark.read.json(file_path)
+print("Records in this batch:", df.count())
+display(df.limit(5))
+
+# COMMAND ----------
+
+from pathlib import Path
+
+base_path = "/Volumes/workspace/air_quality/landing/raw/incremental/"
+
+batches = dbutils.fs.ls(base_path)
+
+for batch in batches:
+    print(f"\nBatch: {batch.name}")
+    files = dbutils.fs.ls(batch.path)
+
+    for file in files:
+        if not file.isDir():
+            print(f"  File: {file.name} | Size: {file.size} bytes")
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/"))
+
+# COMMAND ----------
+
+dbutils.fs.mkdirs("/Volumes/workspace/air_quality/landing/raw/full_load")
+
+# COMMAND ----------
+
+display(dbutils.fs.ls("/Volumes/workspace/air_quality/landing/raw/"))
+
+# COMMAND ----------
+
+display(dbutils.fs.ls(
+    "/Volumes/workspace/air_quality/landing/raw/full_load/batch_0001/"
+))
+
+# COMMAND ----------
+
+base = "/Volumes/workspace/air_quality/landing/raw/full_load/"
+
+for batch in sorted(dbutils.fs.ls(base), key=lambda x: x.name):
+    print(f"\n{batch.name}")
+    for file in dbutils.fs.ls(batch.path):
+        print(f"  {file.name} — {file.size} bytes")
+
+# COMMAND ----------
+
+base = "/Volumes/workspace/air_quality/landing/raw/full_load/"
+
+batches = sorted(
+    [x for x in dbutils.fs.ls(base) if x.isDir()],
+    key=lambda x: x.name
+)
+
+print("Number of full-load batches:", len(batches))
+
+for batch in batches:
+    files = dbutils.fs.ls(batch.path)
+    print(batch.name, "->", len(files), "file(s)")
+
+# COMMAND ----------
+
+display(dbutils.fs.ls(
+    "/Volumes/workspace/air_quality/landing/raw/incremental/"
+))
+
+# COMMAND ----------
+
+dbutils.fs.mkdirs(
+    "/Volumes/workspace/air_quality/landing/raw/incremental/manual_batch_20261001"
+)
+
+# COMMAND ----------
+
+# MAGIC %run ./00_config_helpers
+
+# COMMAND ----------
+
+print("VOLUME_ROOT:", VOLUME_ROOT)
+print("Full-load batches:", list_batches("full_load"))
+print("Incremental batches:", list_batches("incremental"))
