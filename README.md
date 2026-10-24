@@ -1,321 +1,383 @@
 # Air Quality Data Pipeline
 
-A production-grade Medallion Architecture data pipeline built with Apache Spark and Delta Lake on Databricks, ingesting global air quality sensor data from the OpenAQ API to analyze pollution trends across Pakistan, India, and the United States.
+A Medallion Architecture data pipeline built with Apache Spark, PySpark, and Delta Lake on Databricks. The project processes air-quality sensor measurements provided in OpenAQ-compatible JSONL format through Landing, Bronze, Silver, and Gold layers.
+
+The pipeline supports batch ingestion, data validation, unit standardization, Delta Lake merge operations, and execution logging.
 
 ## Architecture Overview
 
-The pipeline implements a four-tier Lakehouse Medallion architecture:
+The pipeline follows a four-layer data architecture:
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        1. API & LANDING ZONE                           │
-│   • OpenAQ API v3 live extractor (00_api_to_landing.py)                │
-│   • Landing Volume: /Volumes/workspace/air_quality/landing/raw/        │
-│   • Batch partitioned: full_load/batch_xxxx, incremental/batch_yyyymmdd │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                           2. BRONZE LAYER                              │
-│   • Notebook: 01_raw_to_bronze.py                                      │
-│   • Table: workspace.air_quality.bronze_readings                       │
-│   • Strict Schema-on-Read (StructType, NO inferSchema)                 │
-│   • Audit tracking: source_file, batch_id, load_type, load_timestamp   │
-│   • Schema drift auto-evolution (mergeSchema = true)                   │
-│   • Corrupt record capture (_corrupt_record)                           │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                           3. SILVER LAYER                              │
-│   • Notebook: 02_bronze_to_silver.py                                   │
-│   • Readings: workspace.air_quality.silver_readings                    │
-│   • Stations: workspace.air_quality.silver_stations                    │
-│   • Quarantine: workspace.air_quality.silver_quarantine                │
-│   • Flattening, strict type casting (try_cast), null/range validation  │
-│   • Standardized pollutant units (ppm/ppb converted to µg/m³)          │
-│   • In-batch deduplication on (sensor_id, datetime_from_utc)           │
-│   • Idempotent upsert via Delta Lake MERGE INTO                        │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                       4. AUDIT & EXECUTION LOGS                        │
-│   • Table: workspace.air_quality.pipeline_execution_logs               │
-│   • Tracks layer, batch_id, start/end time, status, rows read/inserted │
-└────────────────────────────────────────────────────────────────────────┘
-```
+```text
+┌───────────────────────────────────────────────────────────────┐
+│                     1. LANDING LAYER                          │
+│  Source JSONL files organized into full-load and incremental  │
+│  batches in a Databricks Unity Catalog Volume                 │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     2. BRONZE LAYER                           │
+│  Notebook: 01_raw_to_bronze                                   │
+│  Table: workspace.air_quality.bronze_readings                │
+│  Explicit source schema, raw fields, batch metadata,          │
+│  schema-drift handling, and corrupt-record capture            │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     3. SILVER LAYER                           │
+│  Notebook: 02_bronze_to_silver                                │
+│  Tables: silver_readings, silver_stations,                   │
+│          silver_quarantine                                    │
+│  Type casting, validation, unit standardization,              │
+│  deduplication, and Delta Lake MERGE operations               │
+└──────────────────────────────┬────────────────────────────────┘
+                               │
+                               ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     4. GOLD LAYER                             │
+│  Notebook: 03_silver_to_gold.py                               │
+│  Tables: gold_dim_date, gold_dim_location,                    │
+│          gold_dim_parameter, gold_fact_measurements            │
+│  Dimension and fact tables for analytical queries             │
+└───────────────────────────────────────────────────────────────┘
 
----
+              Execution and batch logging
+          workspace.air_quality.pipeline_execution_logs
+```
 
 ## Directory Structure
 
-```
+```text
+air-quality-pipeline-/
 ├── data/
 │   ├── raw/
-│   │   ├── full_load/            # 10 baseline batches (batch_0001 to batch_0010, 13,000 records)
-│   │   └── incremental/          # 3 daily batches (batch_20261001 to batch_20261003, 378 records)
-│   ├── full_load/                # Baseline payload sample
-│   └── incremental_load/         # Incremental payload sample
+│   │   ├── full_load/
+│   │   └── incremental/
+│   ├── full_load/
+│   └── incremental_load/
 ├── notebooks/
-│   ├── 00_config_helpers.py      # Shared config, explicit StructType schema, audit logging, batch helpers
-│   ├── 00_api_to_landing.py      # Live OpenAQ API v3 extractor landing NDJSON to Databricks Volume
-│   ├── 01_raw_to_bronze.py       # Ingests landing batch folders into Bronze Delta table with drift handling
-│   └── 02_bronze_to_silver.py    # Flattens, validates, quarantines, converts units, and MERGEs into Silver
-└── README.md                     # Data models, architecture documentation, and run guide
+│   ├── 00_config_helpers.py
+│   ├── 00_api_to_landing.py
+│   ├── 01_raw_to_bronze.py
+│   ├── 02_bronze_to_silver.py
+│   └── 03_silver_to_gold.py
+└── README.md
 ```
 
----
+*The directory structure above describes the intended organization; the exact locations of files may differ in the Databricks workspace.*
 
-## Data Models & Data Dictionary
+## Technology Stack
 
-### 1. `workspace.air_quality.bronze_readings`
-- **Description**: Raw append-only Delta table preserving the source schema as strings, tracking file origin and load timestamps.
-- **Primary / Natural Key**: `(_sensor_id, period.datetimeFrom.utc)`
-- **Partition Key**: `ingestion_date`
+- **Databricks:** Notebook execution and data engineering environment
+- **Apache Spark / PySpark:** Distributed data processing
+- **Delta Lake:** Table storage and merge operations
+- **Unity Catalog:** Catalog, schema, and Volume organization
+- **OpenAQ data:** Air-quality measurement source and data format
+- **GitHub:** Source control and collaboration
 
-| Column Name | Data Type | Nullable | Description |
-|---|---|---|---|
-| `value` | `STRING` | Yes | Raw pollutant measurement value as reported by the sensor |
-| `flagInfo` | `STRUCT<hasFlags: STRING>` | Yes | Flag indicator for invalid or disputed sensor readings |
-| `parameter` | `STRUCT<id: STRING, name: STRING, units: STRING, displayName: STRING>` | Yes | Pollutant identifier (`pm25`, `o3`, `no2`, `co`, `so2`, `pm10`), units, and display name |
-| `period` | `STRUCT<label: STRING, interval: STRING, datetimeFrom: STRUCT<utc: STRING, local: STRING>, datetimeTo: STRUCT<utc: STRING, local: STRING>>` | Yes | Aggregation window (e.g. 1-hour interval) with UTC and local timestamps |
-| `coordinates` | `STRUCT<latitude: STRING, longitude: STRING>` | Yes | Geographic coordinates of the sensor station |
-| `summary` | `STRUCT<min: STRING, q02: STRING, q25: STRING, median: STRING, q75: STRING, q98: STRING, max: STRING, avg: STRING, sd: STRING>` | Yes | Statistical summary values for the measurement window |
-| `coverage` | `STRUCT<expectedCount: STRING, expectedInterval: STRING, observedCount: STRING, observedInterval: STRING, percentComplete: STRING, percentCoverage: STRING, datetimeFrom: STRUCT<...>, datetimeTo: STRUCT<...>>` | Yes | Sampling coverage percentages and observation completeness |
-| `_sensor_id` | `STRING` | Yes | Unique identifier of the sensor device |
-| `_location_id` | `STRING` | Yes | Unique identifier of the monitoring station |
-| `_location_name` | `STRING` | Yes | Human-readable name of the monitoring station |
-| `_city` | `STRING` | Yes | City or locality of the station |
-| `_country` | `STRING` | Yes | Two-letter ISO country code (`PK`, `IN`, `US`, `DE`, `CA`) |
-| `_parameter` | `STRING` | Yes | Redundant top-level parameter string |
-| `_unit` | `STRING` | Yes | Redundant top-level unit string |
-| `_corrupt_record` | `STRING` | Yes | Unparseable raw JSON text isolated by `PERMISSIVE` mode |
-| `source_file` | `STRING` | No | Originating file URI in the landing volume (`_metadata.file_path`) |
-| `batch_id` | `STRING` | No | Folder name of the batch processed (e.g. `batch_0001`, `batch_20261001`) |
-| `load_type` | `STRING` | No | Ingestion category (`full_load` or `incremental`) |
-| `ingestion_date` | `DATE` | No | Partition date on ingestion (`current_date()`) |
-| `load_timestamp` | `TIMESTAMP` | No | Exact timestamp when the record was written into Bronze |
+## Data Models
 
----
+All tables are managed under the `workspace.air_quality` catalog and schema.
 
-### 2. `workspace.air_quality.silver_readings`
-- **Description**: Cleaned, strongly typed, deduplicated, and unit-standardized air quality observations.
-- **Primary Key**: `(sensor_id, datetime_from_utc)`
+### 1. Bronze — `bronze_readings`
 
-| Column Name | Data Type | Nullable | Description |
-|---|---|---|---|
-| `sensor_id` | `BIGINT` | No | Primary identifier for the sensor device |
-| `location_id` | `BIGINT` | No | Identifier for the station location |
-| `location_name` | `STRING` | Yes | Name of the air quality station |
-| `city` | `STRING` | Yes | City or district of the station |
-| `country` | `STRING` | Yes | Country ISO code |
-| `parameter_id` | `BIGINT` | Yes | OpenAQ parameter ID |
-| `parameter_name` | `STRING` | Yes | Standard pollutant name (`pm25`, `pm10`, `o3`, `no2`, `co`, `so2`) |
-| `parameter_display_name` | `STRING` | Yes | Human-friendly parameter label |
-| `datetime_from_utc` | `TIMESTAMP` | No | Window start timestamp in UTC (Primary Key component) |
-| `datetime_from_local` | `STRING` | Yes | Window start timestamp in station local time |
-| `datetime_to_utc` | `TIMESTAMP` | Yes | Window end timestamp in UTC |
-| `datetime_to_local` | `STRING` | Yes | Window end timestamp in station local time |
-| `value_raw` | `DOUBLE` | Yes | Measurement value as reported originally |
-| `unit_raw` | `STRING` | Yes | Original measurement unit (`ppm`, `ppb`, `µg/m³`) |
-| `value_ugm3` | `DOUBLE` | Yes | Standardized pollutant concentration converted to `µg/m³` |
-| `unit_std` | `STRING` | Yes | Standardized unit label (`µg/m³`) |
-| `has_flags` | `BOOLEAN` | Yes | Boolean flag indicating whether the sensor reading was flagged |
-| `period_label` | `STRING` | Yes | Measurement window interval label (`1hour`) |
-| `period_interval` | `STRING` | Yes | Window duration string (`01:00:00`) |
-| `latitude` | `DOUBLE` | Yes | Station geographic latitude |
-| `longitude` | `DOUBLE` | Yes | Station geographic longitude |
-| `summary_min` | `DOUBLE` | Yes | Period minimum concentration |
-| `summary_max` | `DOUBLE` | Yes | Period maximum concentration |
-| `summary_avg` | `DOUBLE` | Yes | Period average concentration |
-| `summary_median` | `DOUBLE` | Yes | Period median concentration |
-| `coverage_pct` | `DOUBLE` | Yes | Percentage of valid observation coverage (0.0 to 100.0) |
-| `batch_id` | `STRING` | No | Batch folder identifier from which the row originated |
-| `load_type` | `STRING` | No | `full_load` or `incremental` |
-| `load_timestamp` | `TIMESTAMP` | No | Timestamp when the row was merged into Silver |
+**Purpose:** Preserve source measurements in a raw, structured representation for downstream processing.
 
----
+The Bronze layer uses an explicit PySpark `StructType` schema. Source leaf fields are initially represented as strings so that type conversion can take place in Silver.
 
-### 3. `workspace.air_quality.silver_stations`
-- **Description**: Station dimension table capturing physical coordinates and station attributes.
-- **Primary Key**: `(sensor_id, location_id)`
+| Field | Description |
+|---|---|
+| `value` | Original measurement value |
+| `flagInfo` | Measurement flag information |
+| `parameter` | Parameter ID, name, units, and display name |
+| `period` | Measurement interval and UTC/local timestamps |
+| `coordinates` | Latitude and longitude |
+| `summary` | Available measurement summary statistics |
+| `coverage` | Sampling coverage and observation completeness information |
+| `_sensor_id` | Source sensor identifier |
+| `_location_id` | Source location identifier |
+| `_location_name` | Source location name |
+| `_city` | City or locality |
+| `_country` | Country code |
+| `_parameter` | Top-level parameter field |
+| `_unit` | Top-level unit field |
+| `_corrupt_record` | Field used to capture malformed input records |
+| `batch_id` | Batch folder identifier |
+| `load_type` | `full_load` or `incremental` |
+| `load_timestamp` | Timestamp associated with the load |
 
-| Column Name | Data Type | Nullable | Description |
-|---|---|---|---|
-| `sensor_id` | `BIGINT` | No | Sensor identifier |
-| `location_id` | `BIGINT` | No | Station location identifier |
-| `location_name` | `STRING` | Yes | Name of the station |
-| `city` | `STRING` | Yes | City location |
-| `country` | `STRING` | Yes | Country code |
-| `latitude` | `DOUBLE` | Yes | Geographic latitude |
-| `longitude` | `DOUBLE` | Yes | Geographic longitude |
-| `batch_id` | `STRING` | No | Ingested batch identifier |
-| `load_type` | `STRING` | No | Load category |
-| `load_timestamp` | `TIMESTAMP` | No | Timestamp of the station dimension upsert |
+The Bronze ingestion process also discovers unexpected top-level fields and prepares the read schema to accommodate them.
 
----
+**Table:** `workspace.air_quality.bronze_readings`
 
-### 4. `workspace.air_quality.silver_quarantine`
-- **Description**: Isolated non-conforming, corrupt, or logically invalid records rejected from Silver.
-- **Primary Key**: Surrogate / Composite `(batch_id, _sensor_id, datetime_from_utc, load_timestamp)`
+### 2. Silver — `silver_readings`
 
-| Column Name | Data Type | Description |
+**Purpose:** Store validated and strongly typed measurement records with standardized units.
+
+| Column | Data type | Description |
 |---|---|---|
-| `batch_id` | `STRING` | Batch where the rejected record appeared |
-| `load_type` | `STRING` | `full_load` or `incremental` |
-| `_sensor_id` | `STRING` | Sensor ID as string (may be null) |
-| `_location_id` | `STRING` | Location ID as string |
-| `_parameter` | `STRING` | Parameter name |
-| `datetime_from_utc` | `STRING` | UTC timestamp string |
-| `value_raw` | `STRING` | Raw uncastable value |
-| `quarantine_reason` | `STRING` | Detailed failure cause (e.g. `_corrupt_record is not null`, `null key field`, `negative value`) |
-| `raw_json` | `STRING` | Full unparseable JSON payload |
-| `load_timestamp` | `TIMESTAMP` | Quarantine insertion timestamp |
+| `sensor_id` | LONG | Sensor identifier |
+| `location_id` | LONG | Location identifier |
+| `location_name` | STRING | Station name |
+| `city` | STRING | City or locality |
+| `country` | STRING | Country code |
+| `parameter_id` | LONG | Parameter identifier |
+| `parameter_name` | STRING | Standard parameter name |
+| `parameter_display_name` | STRING | Human-readable parameter name |
+| `datetime_from_utc` | TIMESTAMP | Measurement start in UTC |
+| `datetime_from_local` | STRING | Measurement start in local time |
+| `datetime_to_utc` | TIMESTAMP | Measurement end in UTC |
+| `datetime_to_local` | STRING | Measurement end in local time |
+| `value_raw` | DOUBLE | Original numeric measurement |
+| `unit_raw` | STRING | Original measurement unit |
+| `value_ugm3` | DOUBLE | Standardized measurement value, where conversion is possible |
+| `unit_std` | STRING | Standard unit label |
+| `has_flags` | BOOLEAN | Measurement flag indicator |
+| `period_label` | STRING | Measurement period label |
+| `period_interval` | STRING | Measurement interval |
+| `latitude` | DOUBLE | Station latitude |
+| `longitude` | DOUBLE | Station longitude |
+| `summary_min` | DOUBLE | Minimum summary value |
+| `summary_max` | DOUBLE | Maximum summary value |
+| `summary_avg` | DOUBLE | Average summary value |
+| `summary_median` | DOUBLE | Median summary value |
+| `coverage_pct` | DOUBLE | Measurement coverage percentage |
+| `batch_id` | STRING | Source batch identifier |
+| `load_type` | STRING | Load category |
+| `load_timestamp` | TIMESTAMP | Load timestamp |
 
----
+The current Silver merge key is `(sensor_id, datetime_from_utc)`.
 
-### 5. `workspace.air_quality.pipeline_execution_logs`
-- **Description**: Dedicated audit logging table recording operational metrics for every execution step across all layers.
-- **Primary Key**: `(run_id, batch_id, layer)`
+The transformation process flattens nested fields, casts values to appropriate types, validates records, deduplicates data within a batch, and uses Delta Lake `MERGE INTO` operations to update existing records or insert new ones.
 
-| Column Name | Data Type | Description |
+The `to_ugm3()` function standardizes supported units to micrograms per cubic meter (`µg/m³`). Measurements with unsupported units may remain in Silver with a null standardized value.
+
+**Table:** `workspace.air_quality.silver_readings`
+
+### 3. Silver — `silver_stations`
+
+**Purpose:** Store station and location attributes separately from measurement records.
+
+| Column | Data type | Description |
 |---|---|---|
-| `run_id` | `STRING` | Unique execution run ID (`YYYYMMDDHHMMSS_uuid`) |
-| `batch_id` | `STRING` | Name of the batch processed |
-| `layer` | `STRING` | Pipeline stage (`API-to-Landing`, `Raw-to-Bronze`, `Bronze-to-Silver`) |
-| `load_type` | `STRING` | `full_load` or `incremental` |
-| `run_mode` | `STRING` | `pending`, `backfill`, or `live_api` |
-| `parameters` | `STRING` | JSON string of execution widgets/parameters |
-| `source_path` | `STRING` | Source URI or table predicate processed |
-| `start_time` | `TIMESTAMP` | UTC start timestamp of the step |
-| `end_time` | `TIMESTAMP` | UTC end timestamp of the step |
-| `status` | `STRING` | `SUCCESS` or `FAILURE` |
-| `rows_read` | `BIGINT` | Total input rows read |
-| `rows_inserted` | `BIGINT` | New rows written to the target table |
-| `rows_updated` | `BIGINT` | Existing rows updated via MERGE or replace |
-| `rows_quarantined` | `BIGINT` | Bad rows routed to quarantine |
-| `notes` | `STRING` | Descriptive audit messages (e.g., schema drift discovered, idempotent re-run) |
-| `error_message` | `STRING` | Captured error message on failure |
-| `load_timestamp` | `TIMESTAMP` | Log record write timestamp |
+| `sensor_id` | LONG | Sensor identifier |
+| `location_id` | LONG | Location identifier |
+| `location_name` | STRING | Station name |
+| `city` | STRING | City or locality |
+| `country` | STRING | Country code |
+| `latitude` | DOUBLE | Station latitude |
+| `longitude` | DOUBLE | Station longitude |
+| `batch_id` | STRING | Source batch identifier |
+| `load_type` | STRING | Load category |
+| `load_timestamp` | TIMESTAMP | Load timestamp |
 
----
+The current station merge key is `(sensor_id, location_id)`.
 
-## Environment Setup & Execution Guide
+**Table:** `workspace.air_quality.silver_stations`
 
-### 1. Workspace Configuration & Git Sync
-1. Open Databricks and navigate to **Workspace**.
-2. Select **Create** > **Git folder**.
-3. Repository URL: `https://github.com/aliyahrasheed/air-quality-pipeline-`
-4. Confirm that the folder contains notebooks `00_config_helpers`, `00_api_to_landing`, `01_raw_to_bronze`, and `02_bronze_to_silver`.
+### 4. Silver — `silver_quarantine`
 
-### 2. Unity Catalog Schema & Volume Setup
-Run once in a Databricks SQL query or cluster:
-```sql
-USE CATALOG workspace;
-CREATE SCHEMA IF NOT EXISTS air_quality;
-CREATE VOLUME IF NOT EXISTS workspace.air_quality.landing;
+**Purpose:** Retain records that fail specified data-quality checks so that their issues can be investigated.
+
+| Column | Data type | Description |
+|---|---|---|
+| `batch_id` | STRING | Source batch identifier |
+| `load_type` | STRING | Load category |
+| `_sensor_id` | STRING | Source sensor identifier |
+| `_location_id` | STRING | Source location identifier |
+| `_parameter` | STRING | Source parameter name |
+| `datetime_from_utc` | STRING | Source measurement timestamp |
+| `value_raw` | STRING | Original measurement value |
+| `quarantine_reason` | STRING | Reason the record was quarantined |
+| `raw_json` | STRING | Raw record content |
+| `load_timestamp` | TIMESTAMP | Quarantine timestamp |
+
+The transformation notebook routes records failing its configured checks, such as malformed records, missing key fields, or negative measurement values, to this table.
+
+**Table:** `workspace.air_quality.silver_quarantine`
+
+### 5. Execution Logs — `pipeline_execution_logs`
+
+**Purpose:** Record batch processing activity and execution outcomes across the pipeline.
+
+| Column | Data type | Description |
+|---|---|---|
+| `run_id` | STRING | Identifier for an execution |
+| `batch_id` | STRING | Batch being processed |
+| `layer` | STRING | Pipeline layer |
+| `load_type` | STRING | Full-load or incremental category |
+| `run_mode` | STRING | Processing mode |
+| `parameters` | STRING | JSON representation of run parameters |
+| `source_path` | STRING | Source path or source-table description |
+| `start_time` | TIMESTAMP | Execution start time |
+| `end_time` | TIMESTAMP | Execution end time |
+| `status` | STRING | Execution status |
+| `rows_read` | BIGINT | Number of input rows |
+| `rows_inserted` | BIGINT | Number of inserted rows |
+| `rows_updated` | BIGINT | Number of updated rows |
+| `rows_quarantined` | BIGINT | Number of quarantined rows |
+| `notes` | STRING | Additional execution information |
+| `error_message` | STRING | Error details, when applicable |
+| `load_timestamp` | TIMESTAMP | Log write timestamp |
+
+The shared helper notebook defines the execution-log schema and the `log_run()` function used by the ingestion and transformation notebooks.
+
+**Table:** `workspace.air_quality.pipeline_execution_logs`
+
+### 6. Gold — Dimension and Fact Tables
+
+**Purpose:** Organize the processed Silver data into tables intended for analytical queries.
+
+| Table | Purpose | Observed row count |
+|---|---|---:|
+| `gold_dim_date` | Date dimension | 54 |
+| `gold_dim_location` | Location dimension | 13 |
+| `gold_dim_parameter` | Parameter dimension | 9 |
+| `gold_fact_measurements` | Air-quality measurement fact table | 13,000 |
+
+These counts were observed after the successful Gold notebook run. They describe that execution and may change when additional data is processed.
+
+## Environment Setup and Execution Guide
+
+### 1. Databricks and Git Setup
+
+1. Open Databricks and navigate to your Git folder.
+2. Connect the repository:
+
+   `https://github.com/aliyahrasheed/air-quality-pipeline-`
+
+3. Select the branch containing the notebooks you intend to run.
+4. Confirm that the required notebooks are available in the Git folder.
+
+### 2. Catalog, Schema, and Volume
+
+The project configuration uses:
+
+- Catalog: `workspace`
+- Schema: `air_quality`
+- Landing root: `/Volumes/workspace/air_quality/landing/raw`
+
+The shared helper notebook creates the schema if it does not exist.
+
+The landing Volume must exist and be accessible before uploading or reading source files.
+
+### 3. Landing Raw Data
+
+The pipeline supports full-load and incremental batches organized into folders under the landing root.
+
+Example layout:
+
+```text
+/Volumes/workspace/air_quality/landing/raw/
+├── full_load/
+│   ├── batch_0001/
+│   ├── batch_0002/
+│   └── ...
+└── incremental/
+    └── <incremental_batch_folder>/
 ```
-The root landing volume will be: `/Volumes/workspace/air_quality/landing/raw`
 
-### 3. Landing the Raw Data
-You can populate the landing directory in two ways:
+Each batch folder should contain its source JSONL file or files.
 
-#### Option A: Manual Raw Upload (Batch Baseline)
-1. Compress your `data/raw/` folder into `raw.zip`.
-2. Upload `raw.zip` to `/Volumes/workspace/air_quality/landing/`.
-3. In a notebook cell, extract the archive:
-   ```python
-   import zipfile
-   base = "/Volumes/workspace/air_quality/landing"
-   with zipfile.ZipFile(f"{base}/raw.zip") as z:
-       z.extractall(base)
-   ```
-4. Verify files exist under `/Volumes/workspace/air_quality/landing/raw/full_load/` and `.../raw/incremental/`.
+The project also includes an API-to-Landing notebook for the API ingestion workflow. Manual file uploads can be used to populate the landing Volume instead.
 
-#### Option B: Live API Ingestion (`00_api_to_landing.py`)
-1. Open notebook `notebooks/00_api_to_landing.py`.
-2. Set widget `country` (e.g., `PK`, `IN`, or `US`) and `limit` (e.g., `100`).
-3. Click **Run All**. The notebook extracts live measurements from OpenAQ API v3 and lands a new batch in `/Volumes/workspace/air_quality/landing/raw/incremental/batch_<date>/`.
+### 4. Run Bronze Ingestion
 
----
+Open `01_raw_to_bronze`.
 
-### 4. Running Bronze Ingestion (`01_raw_to_bronze.py`)
+Configure the widgets:
 
-#### A. Standard Full Load (Baseline)
-- Set widgets:
-  - `load_type`: `full_load`
-  - `run_mode`: `pending`
-  - `start_batch`: `""`
-  - `end_batch`: `""`
-- Execute **Run All**: Ingests all 10 full-load batches (13,000 records).
+| Widget | Full-load run | Incremental run |
+|---|---|---|
+| `load_type` | `full_load` | `incremental` |
+| `run_mode` | `pending` | `pending` |
+| `start_batch` | Leave blank unless selecting a range | Leave blank unless selecting a range |
+| `end_batch` | Leave blank unless selecting a range | Leave blank unless selecting a range |
 
-#### B. Standard Incremental Load
-- Set widgets:
-  - `load_type`: `incremental`
-  - `run_mode`: `pending`
-- Execute **Run All**: Ingests pending incremental batches (378 records).
+Run the notebook and confirm that the batch-processing summary reports success.
 
-#### C. Backfill an Older Period
-- Set widgets:
-  - `load_type`: `full_load`
-  - `run_mode`: `backfill`
-  - `start_batch`: `batch_0003`
-  - `end_batch`: `batch_0005`
-- Execute **Run All**: Re-processes only `batch_0003`, `batch_0004`, and `batch_0005` idempotently via `replaceWhere`, recording `rows_updated = N, rows_inserted = 0`.
+The `pending` mode selects batches that do not already have a successful execution-log entry for the relevant layer and load type.
 
----
+### 5. Run Silver Transformations
 
-### 5. Running Silver Transformations (`02_bronze_to_silver.py`)
+After Bronze succeeds, open `02_bronze_to_silver`.
 
-#### A. Full Load Promotion
-- Set `load_type` = `full_load`, `run_mode` = `pending`.
-- Execute **Run All**: Flattens, cleans, standardizes units, and MERGEs into `silver_readings` and `silver_stations`.
+Use the corresponding `load_type` and `run_mode` values. Run the notebook and review the execution summary.
 
-#### B. Incremental Promotion
-- Set `load_type` = `incremental`, `run_mode` = `pending`.
-- Execute **Run All**: Promotes only newly arrived bronze batches.
+The Silver process transforms Bronze records, validates data, standardizes supported measurement units, updates Silver tables, and records processing outcomes.
 
-#### C. Idempotency Test (Duplicate Prevention)
-- Set `run_mode` = `backfill`, `start_batch` = `batch_0001`, `end_batch` = `batch_0001`.
-- Execute **Run All**: The MERGE statement finds all keys match:
-  - Total row count remains **13,378**.
-  - Log records `rows_inserted = 0`, `rows_updated = 169`.
-  - Zero duplicate records are generated.
+### 6. Run Gold Transformations
 
----
+After Silver succeeds, open `03_silver_to_gold.py`.
 
-## Technical Features & Rubric Compliance
+Run the notebook and review its output. Confirm that the four Gold tables exist and contain data.
 
-### 1. Strict Schema-on-Read (No `inferSchema`)
-The schema is defined explicitly in [`00_config_helpers.py`](file:///c:/krita%20creations/dw/air-quality-pipeline-/notebooks/00_config_helpers.py#L65) using PySpark `StructType` and `StructField`. All leaf fields are ingested as strings in Bronze to guarantee that unexpected format shifts never break the raw ingestion layer.
+The successful run documented for this project returned:
 
-### 2. Schema Drift Handling
-- **Discovery**: In `01_raw_to_bronze.py`, the function `discover_new_keys()` inspects incoming JSON keys without triggering schema inference.
-- **Auto-evolution**: Any newly detected columns are appended dynamically to the read schema, Delta-sanitized with `safe_col_name()`, and absorbed using `.option("mergeSchema", "true")`.
+- `gold_dim_date`: 54 rows
+- `gold_dim_location`: 13 rows
+- `gold_dim_parameter`: 9 rows
+- `gold_fact_measurements`: 13,000 rows
 
-### 3. Data Cleansing, Unit Standardization & Quarantine
-- **Type Casting**: In `02_bronze_to_silver.py`, fields are safely cast using `try_cast(...)`.
-- **Unit Standardization**: The UDF `to_ugm3()` converts gas pollutants reported in `ppm` or `ppb` (`no2`, `o3`, `so2`, `co`, `no`, `nox`) to standard micrograms per cubic meter (`µg/m³`) using molecular weight gas constants at standard temperature and pressure.
-- **Quarantine Routing**: Records with `_corrupt_record IS NOT NULL`, null primary keys, or negative values are routed to `silver_quarantine` along with a documented `quarantine_reason`.
+## Technical Features
 
-### 4. Idempotency via Delta `MERGE INTO`
-Silver updates use Delta Lake's native `merge()` API:
-```python
-dt.alias("tgt").merge(
-    silver_df.alias("src"),
-    "tgt.sensor_id = src.sensor_id AND tgt.datetime_from_utc = src.datetime_from_utc"
-).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
-```
-Repeated executions update existing records rather than duplicating them.
+### 1. Explicit Schema
 
-### 5. Execution Logs Verification
-Every execution across all layers writes a structured audit log. Inspect the log table with:
+The shared configuration notebook defines the source schema using PySpark `StructType` and `StructField`. Leaf fields are initially represented as strings so that type casting can take place in Silver.
+
+### 2. Schema-Drift Handling
+
+The helper functions inspect top-level JSON keys and identify fields not included in the expected source schema. The Bronze notebook uses these helpers when preparing its input schema.
+
+### 3. Validation and Quarantine
+
+The Silver notebook applies type conversion and configured data-quality checks. Records that fail applicable checks can be routed to `silver_quarantine` with a reason for investigation.
+
+### 4. Unit Standardization
+
+The `to_ugm3()` function handles recognized units and supported pollutant conversion factors. Values already expressed in the standard unit are retained; supported `ppm` and `ppb` values are converted where the function has a corresponding factor.
+
+### 5. Delta Lake Merge Operations
+
+Silver processing uses Delta Lake merge operations to update matching records and insert new records. This supports repeatable batch processing according to the merge keys defined in the notebooks.
+
+### 6. Execution Logging
+
+The pipeline records execution metadata and row counts in `workspace.air_quality.pipeline_execution_logs`.
+
+Use the following query to inspect recent executions:
+
 ```sql
-SELECT 
-    run_id, batch_id, layer, load_type, run_mode, status, 
-    rows_read, rows_inserted, rows_updated, rows_quarantined, 
-    start_time, end_time, notes
+SELECT
+    run_id,
+    batch_id,
+    layer,
+    load_type,
+    run_mode,
+    status,
+    rows_read,
+    rows_inserted,
+    rows_updated,
+    rows_quarantined,
+    start_time,
+    end_time,
+    notes,
+    error_message
 FROM workspace.air_quality.pipeline_execution_logs
 ORDER BY start_time DESC;
 ```
+
+## Project Validation
+
+The Bronze, Silver, and Gold notebooks were run successfully during the documented project workflow. The Gold output contained the four dimension/fact tables and the row counts listed above.
+
+For further validation, inspect execution logs, review quarantined records, and verify that the keys and relationships between Gold dimensions and fact records behave as expected.
+
+## Future Improvements
+
+- Add automated assertions for data quality and dimension/fact relationships.
+- Schedule the notebooks as a Databricks Workflow.
+- Expand monitoring for incremental loads and schema changes.
+- Develop analytical queries and visualizations using the Gold tables.
