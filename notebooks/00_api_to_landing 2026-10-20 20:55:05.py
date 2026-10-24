@@ -68,6 +68,19 @@ locations_url = "https://api.openaq.org/v3/locations?" + urllib.parse.urlencode(
 all_locations = get_json(locations_url).get("results", [])
 print(f"Locations returned by API: {len(all_locations)}")
 
+for i, loc in enumerate(all_locations[:3], start=1):
+    print(f"\nLocation {i}: {loc.get('name')}")
+    print(f"Location ID: {loc.get('id')}")
+    print(f"Sensors returned: {len(loc.get('sensors') or [])}")
+
+    for sensor in (loc.get("sensors") or [])[:5]:
+        parameter = sensor.get("parameter") or {}
+        print(
+            f"  Sensor ID: {sensor.get('id')}, "
+            f"Parameter: {parameter.get('name')}, "
+            f"Units: {parameter.get('units')}"
+        )
+
 # COMMAND ----------
 
 print("Number of locations:", len(all_locations))
@@ -333,6 +346,35 @@ file_path = "/Volumes/workspace/air_quality/landing/raw/incremental/batch_201906
 
 lines = dbutils.fs.head(file_path, 10000)
 print(lines[:1000])
+
+# COMMAND ----------
+
+test_day = datetime.strptime("2026-10-20", "%Y-%m-%d").date()
+
+for sensor_id in [23455, 23747, 25066]:
+    params = {
+        "datetime_from": iso_utc(test_day),
+        "datetime_to": iso_utc(test_day, end=True),
+        "limit": 5,
+        "page": 1,
+    }
+
+    url = (
+        f"https://api.openaq.org/v3/sensors/{sensor_id}/measurements?"
+        + urllib.parse.urlencode(params)
+    )
+
+    try:
+        results = get_json(url).get("results", [])
+        print(f"\nSensor {sensor_id}: {len(results)} measurements")
+
+        for result in results[:2]:
+            print(
+                "  Date:", result.get("period", {}).get("datetimeFrom", {}),
+                "Value:", result.get("value")
+            )
+    except Exception as e:
+        print(f"\nSensor {sensor_id}: request failed — {e}")
 
 # COMMAND ----------
 
