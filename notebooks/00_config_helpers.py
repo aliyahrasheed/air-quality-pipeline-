@@ -1,10 +1,14 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # 00 - Config & Helpers
 # MAGIC Shared configuration, explicit schemas, logging and helper functions.
-# MAGIC Every other notebook starts with `%run ./00_config_helpers`.
+# MAGIC Every other pipeline notebook starts with `%run ./00_config_helpers`.
 # MAGIC
-# MAGIC **Nothing here processes data** - it only defines things and creates the log table.
+# MAGIC **Nothing here processes data** - it only defines parameters, schemas, and helper functions.
 
 # COMMAND ----------
 
@@ -22,25 +26,33 @@ from pyspark.sql.types import (
 
 # MAGIC %md
 # MAGIC ## 1. Configuration
-# MAGIC Change `CATALOG` if your catalog is not called `workspace`.
+# MAGIC Unity Catalog constants, Volume roots, and Schema-qualified Delta tables.
 
 # COMMAND ----------
 
 CATALOG = "workspace"
 SCHEMA = "air_quality"
 
-# Root folder that contains  full_load/batch_xxxx  and  incremental/batch_yyyymmdd (JSON Lines files)
-VOLUME_ROOT = "/Volumes/workspace/air_quality/landing/raw"
+# Root volume folder containing manual data: full_load/batch_xxxx and incremental/batch_yyyymmdd
+VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/landing/raw"
 
-# Table names (schema-qualified; catalog is set with USE CATALOG below)
-BRONZE_TABLE = f"{SCHEMA}.bronze_readings"
-SILVER_TABLE = f"{SCHEMA}.silver_readings"
-SILVER_STATIONS_TABLE = f"{SCHEMA}.silver_stations"
-QUARANTINE_TABLE = f"{SCHEMA}.silver_quarantine"
-LOG_TABLE = f"{SCHEMA}.pipeline_execution_logs"
+# Fully qualified Delta table names
+BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_readings"
+SILVER_TABLE = f"{CATALOG}.{SCHEMA}.silver_readings"
+SILVER_STATIONS_TABLE = f"{CATALOG}.{SCHEMA}.silver_stations"
+QUARANTINE_TABLE = f"{CATALOG}.{SCHEMA}.silver_quarantine"
+LOG_TABLE = f"{CATALOG}.{SCHEMA}.pipeline_execution_logs"
 
+# Gold table names
+GOLD_DATE_TABLE = f"{CATALOG}.{SCHEMA}.gold_dim_date"
+GOLD_LOCATION_TABLE = f"{CATALOG}.{SCHEMA}.gold_dim_location"
+GOLD_PARAMETER_TABLE = f"{CATALOG}.{SCHEMA}.gold_dim_parameter"
+GOLD_FACT_TABLE = f"{CATALOG}.{SCHEMA}.gold_fact_measurements"
+
+# Layer names for audit logs
 LAYER_BRONZE = "Raw-to-Bronze"
 LAYER_SILVER = "Bronze-to-Silver"
+LAYER_GOLD = "Silver-to-Gold"
 
 spark.sql(f"USE CATALOG {CATALOG}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
@@ -103,9 +115,8 @@ def safe_col_name(name):
 
 def discover_new_keys(files_glob):
     """
-    Look at the TOP-LEVEL keys that really appear in the raw files (no schema inference:
-    each line is read as text and we only list its keys) and return those that are not in
-    our expected schema. These are 'drifted' columns.
+    Inspect TOP-LEVEL keys present in raw JSON lines without full schema inference.
+    Returns any unrecognized top-level columns as schema drift.
     """
     try:
         keys = (
@@ -140,7 +151,11 @@ def list_batches(load_type, start_batch="", end_batch=""):
     start_batch / end_batch are inclusive and optional - this is how backfills pick a range.
     """
     root = f"{VOLUME_ROOT}/{load_type}"
-    names = sorted(f.name.rstrip("/") for f in dbutils.fs.ls(root) if f.name.endswith("/"))
+    try:
+        names = sorted(f.name.rstrip("/") for f in dbutils.fs.ls(root) if f.name.endswith("/"))
+    except Exception as e:
+        print(f"Notice: Root folder {root} does not exist or is empty: {e}")
+        return []
     if start_batch:
         names = [n for n in names if n >= start_batch]
     if end_batch:

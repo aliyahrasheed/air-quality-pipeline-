@@ -3,26 +3,27 @@
 # [tool.databricks.environment]
 # environment_version = "6"
 # ///
-# MAGIC %sql
-# MAGIC SELECT COUNT(*) FROM workspace.air_quality.bronze_readings
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # 01 - Raw to Bronze
-# MAGIC Reads raw JSON **batch folders in sorted order**, one batch at a time, and writes them to the Bronze Delta table.
+# MAGIC Reads raw manual JSON **batch folders in sorted chronological order**, one batch at a time,
+# MAGIC and writes them to the Bronze Delta table (`workspace.air_quality.bronze_readings`).
 # MAGIC
 # MAGIC | Parameter | Meaning |
 # MAGIC |---|---|
-# MAGIC | `load_type` | `full_load` or `incremental` (the sub-folder under the raw root) |
-# MAGIC | `run_mode` | `pending` = only batches not yet logged as SUCCESS (normal run). `backfill` = re-process every batch in the range |
+# MAGIC | `load_type` | `full_load` or `incremental` (the sub-folder under the raw landing volume) |
+# MAGIC | `run_mode` | `pending` = only batches not yet logged as SUCCESS (normal run). `backfill` = re-process every batch in range |
 # MAGIC | `start_batch` / `end_batch` | Optional inclusive folder-name range, e.g. `batch_0003` to `batch_0005` |
 # MAGIC
-# MAGIC **Idempotent:** a batch is replaced (`replaceWhere`) instead of appended, so re-running never duplicates rows.
+# MAGIC **Idempotent:** Batches are replaced (`replaceWhere`) instead of appended, so re-running never duplicates rows.
 
 # COMMAND ----------
 
 # MAGIC %run ./00_config_helpers
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. Run Parameters
 
 # COMMAND ----------
 
@@ -37,7 +38,12 @@ start_batch = dbutils.widgets.get("start_batch").strip()
 end_batch = dbutils.widgets.get("end_batch").strip()
 
 params = {"load_type": load_type, "run_mode": run_mode, "start_batch": start_batch, "end_batch": end_batch}
-print(params)
+print("Run parameters:", params)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. Core Ingestion Logic
 
 # COMMAND ----------
 
@@ -122,12 +128,17 @@ def process_bronze_batch(run_id, batch_name):
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## 3. Batch Execution
+
+# COMMAND ----------
+
 run_id = new_run_id()
 batches = select_batches(LAYER_BRONZE, load_type, run_mode, start_batch, end_batch)   # already sorted
 print(f"run_id={run_id} | {len(batches)} batch(es) to process: {batches}")
 
 results = {}
-for b in batches:                       # sorted order = file order
+for b in batches:                       # sorted order = chronological file order
     results[b] = process_bronze_batch(run_id, b)
 
 failed = [b for b, ok in results.items() if not ok]
@@ -135,7 +146,7 @@ failed = [b for b, ok in results.items() if not ok]
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Check the result
+# MAGIC ## 4. Run Summary & Verification
 
 # COMMAND ----------
 
@@ -155,9 +166,12 @@ if failed:
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT COUNT(*) AS total_rows FROM workspace.air_quality.bronze_readings
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT batch_id, COUNT(*) AS n FROM workspace.air_quality.bronze_readings GROUP BY batch_id ORDER BY batch_id
+# MAGIC SELECT 
+# MAGIC   batch_id, 
+# MAGIC   load_type, 
+# MAGIC   COUNT(*) AS total_records,
+# MAGIC   MIN(load_timestamp) AS first_loaded,
+# MAGIC   MAX(load_timestamp) AS last_loaded
+# MAGIC FROM workspace.air_quality.bronze_readings 
+# MAGIC GROUP BY batch_id, load_type 
+# MAGIC ORDER BY batch_id;
