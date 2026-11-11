@@ -1,15 +1,15 @@
 # Air Quality Data Pipeline
 
-A production-grade Medallion Architecture data pipeline built with Apache Spark and Delta Lake on Databricks, ingesting global air quality sensor data from the OpenAQ API to analyze pollution trends across Pakistan, India, and the United States.
+A production-grade Medallion Architecture data pipeline built with Apache Spark and Delta Lake on Databricks, ingesting manually landed batch files of OpenAQ air quality sensor data to analyze pollution trends across Berlin (DE), Toronto (CA) and New York (US).
 
 ## Architecture Overview
 
-The pipeline implements a four-tier Lakehouse Medallion architecture:
+The pipeline implements a Lakehouse Medallion architecture (Landing → Bronze → Silver → Gold, with an audit log):
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        1. API & LANDING ZONE                           │
-│   • OpenAQ API v3 live extractor (00_api_to_landing.py)                │
+│                        1. MANUAL LANDING ZONE                          │
+│   • Manual batch files copied in by 00_setup_landing_data.py           │
 │   • Landing Volume: /Volumes/workspace/air_quality/landing/raw/        │
 │   • Batch partitioned: full_load/batch_xxxx, incremental/batch_yyyymmdd │
 └───────────────────────────────────┬────────────────────────────────────┘
@@ -40,7 +40,17 @@ The pipeline implements a four-tier Lakehouse Medallion architecture:
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       4. AUDIT & EXECUTION LOGS                        │
+│                            4. GOLD LAYER                               │
+│   • 03_silver_to_gold.py: star schema (dim_date, dim_location,         │
+│     dim_parameter, fact_measurements) via deterministic xxhash64 keys  │
+│   • 04_gold_aggregates_and_validation.py: daily KPI aggregate, WHO     │
+│     exceedance view, gap-free calendar, validation checks              │
+│   • gold_to_powerbi.py: CSV export -> Power BI semantic model          │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       5. AUDIT & EXECUTION LOGS                        │
 │   • Table: workspace.air_quality.pipeline_execution_logs               │
 │   • Tracks layer, batch_id, start/end time, status, rows read/inserted │
 └────────────────────────────────────────────────────────────────────────┘
@@ -59,9 +69,13 @@ The pipeline implements a four-tier Lakehouse Medallion architecture:
 │   └── incremental_load/         # Incremental payload sample
 ├── notebooks/
 │   ├── 00_config_helpers.py      # Shared config, explicit StructType schema, audit logging, batch helpers
-│   ├── 00_api_to_landing.py      # Live OpenAQ API v3 extractor landing NDJSON to Databricks Volume
+│   ├── 00_setup_landing_data.py  # Copies repo batch files into the landing Volume
 │   ├── 01_raw_to_bronze.py       # Ingests landing batch folders into Bronze Delta table with drift handling
-│   └── 02_bronze_to_silver.py    # Flattens, validates, quarantines, converts units, and MERGEs into Silver
+│   ├── 02_bronze_to_silver.py    # Flattens, validates, quarantines, converts units, and MERGEs into Silver
+│   ├── 03_silver_to_gold.py      # Star schema (3 dims + fact), idempotent MERGE, referential-integrity check
+│   ├── 04_gold_aggregates_and_validation.py  # Gap-free calendar, daily KPI aggregate, WHO view, validation checks
+│   └── gold_to_powerbi.py        # Exports Gold tables as CSV for Power BI
+├── docs/GOLD_AND_POWERBI_GUIDE.md  # Gold model, DAX measures, dashboard spec, evaluation checklist
 └── README.md                     # Data models, architecture documentation, and run guide
 ```
 
@@ -87,7 +101,7 @@ The pipeline implements a four-tier Lakehouse Medallion architecture:
 | `_location_id` | `STRING` | Yes | Unique identifier of the monitoring station |
 | `_location_name` | `STRING` | Yes | Human-readable name of the monitoring station |
 | `_city` | `STRING` | Yes | City or locality of the station |
-| `_country` | `STRING` | Yes | Two-letter ISO country code (`PK`, `IN`, `US`, `DE`, `CA`) |
+| `_country` | `STRING` | Yes | Two-letter ISO country code (`DE`, `CA`, `US` in the supplied data) |
 | `_parameter` | `STRING` | Yes | Redundant top-level parameter string |
 | `_unit` | `STRING` | Yes | Redundant top-level unit string |
 | `_corrupt_record` | `STRING` | Yes | Unparseable raw JSON text isolated by `PERMISSIVE` mode |
@@ -183,9 +197,9 @@ The pipeline implements a four-tier Lakehouse Medallion architecture:
 |---|---|---|
 | `run_id` | `STRING` | Unique execution run ID (`YYYYMMDDHHMMSS_uuid`) |
 | `batch_id` | `STRING` | Name of the batch processed |
-| `layer` | `STRING` | Pipeline stage (`API-to-Landing`, `Raw-to-Bronze`, `Bronze-to-Silver`) |
+| `layer` | `STRING` | Pipeline stage (`Raw-to-Bronze`, `Bronze-to-Silver`, `Silver-to-Gold`) |
 | `load_type` | `STRING` | `full_load` or `incremental` |
-| `run_mode` | `STRING` | `pending`, `backfill`, or `live_api` |
+| `run_mode` | `STRING` | `pending` or `backfill` |
 | `parameters` | `STRING` | JSON string of execution widgets/parameters |
 | `source_path` | `STRING` | Source URI or table predicate processed |
 | `start_time` | `TIMESTAMP` | UTC start timestamp of the step |
@@ -201,13 +215,46 @@ The pipeline implements a four-tier Lakehouse Medallion architecture:
 
 ---
 
+## Gold Layer Data Model (Star Schema)
+
+```
+                 gold_dim_date                gold_dim_parameter
+                 (date_key PK)                (parameter_key PK)
+                       \                          /
+                        \                        /
+                      gold_fact_measurements  (measurement_key PK)
+                        /                        \
+                       /                          \
+              gold_dim_location          gold_agg_daily_city_parameter
+              (location_key PK)          (date_key, city, parameter_key)
+```
+
+| Table | Grain | Key | Rows come from |
+|---|---|---|---|
+| `gold_dim_date` | one row per calendar day (gap-free) | `date_key` = `yyyyMMdd` | `03` + `04` |
+| `gold_dim_location` | one row per `(sensor_id, location_id)` | `location_key` = `xxhash64(sensor_id, location_id)` | `03` |
+| `gold_dim_parameter` | one row per pollutant | `parameter_key` = `xxhash64(parameter_id, lower(name))` | `03` |
+| `gold_fact_measurements` | one row per Silver reading (`sensor_id`, `datetime_from_utc`) | `measurement_key` = `xxhash64(sensor_id, datetime, parameter)` | `03` |
+| `gold_agg_daily_city_parameter` | `(date, city, country, pollutant)` | composite | `04` |
+| `gold_vw_who_exceedance` | view over the aggregate, daily vs WHO 2021 guideline | - | `04` |
+
+**Design choices:** deterministic hash surrogate keys mean dimensions and facts agree without lookups and reruns never
+create duplicates; dimensions are merged before the fact so foreign keys always resolve; flagged readings are
+excluded from KPI averages but counted in `flagged_readings`.
+
+**Run order:** `03_silver_to_gold` (full_load, then incremental) -> `04_gold_aggregates_and_validation` -> `gold_to_powerbi`.
+
+See [`docs/GOLD_AND_POWERBI_GUIDE.md`](docs/GOLD_AND_POWERBI_GUIDE.md) for the Power BI model, DAX measures and evaluation checklist.
+
+---
+
 ## Environment Setup & Execution Guide
 
 ### 1. Workspace Configuration & Git Sync
 1. Open Databricks and navigate to **Workspace**.
 2. Select **Create** > **Git folder**.
 3. Repository URL: `https://github.com/aliyahrasheed/air-quality-pipeline-`
-4. Confirm that the folder contains notebooks `00_config_helpers`, `00_api_to_landing`, `01_raw_to_bronze`, and `02_bronze_to_silver`.
+4. Confirm that the folder contains notebooks `00_config_helpers`, `00_setup_landing_data`, `01_raw_to_bronze`, `02_bronze_to_silver`, `03_silver_to_gold`, and `04_gold_aggregates_and_validation`.
 
 ### 2. Unity Catalog Schema & Volume Setup
 Run once in a Databricks SQL query or cluster:
@@ -219,9 +266,9 @@ CREATE VOLUME IF NOT EXISTS workspace.air_quality.landing;
 The root landing volume will be: `/Volumes/workspace/air_quality/landing/raw`
 
 ### 3. Landing the Raw Data
-You can populate the landing directory in two ways:
+The landing directory is populated manually from the batch files in `data/raw/`:
 
-#### Option A: Manual Raw Upload (Batch Baseline)
+#### Manual Raw Upload (Full-Load and Incremental Batches)
 1. Compress your `data/raw/` folder into `raw.zip`.
 2. Upload `raw.zip` to `/Volumes/workspace/air_quality/landing/`.
 3. In a notebook cell, extract the archive:
@@ -233,10 +280,6 @@ You can populate the landing directory in two ways:
    ```
 4. Verify files exist under `/Volumes/workspace/air_quality/landing/raw/full_load/` and `.../raw/incremental/`.
 
-#### Option B: Live API Ingestion (`00_api_to_landing.py`)
-1. Open notebook `notebooks/00_api_to_landing.py`.
-2. Set widget `country` (e.g., `PK`, `IN`, or `US`) and `limit` (e.g., `100`).
-3. Click **Run All**. The notebook extracts live measurements from OpenAQ API v3 and lands a new batch in `/Volumes/workspace/air_quality/landing/raw/incremental/batch_<date>/`.
 
 ---
 
@@ -288,7 +331,7 @@ You can populate the landing directory in two ways:
 ## Technical Features & Rubric Compliance
 
 ### 1. Strict Schema-on-Read (No `inferSchema`)
-The schema is defined explicitly in [`00_config_helpers.py`](file:///c:/krita%20creations/dw/air-quality-pipeline-/notebooks/00_config_helpers.py#L65) using PySpark `StructType` and `StructField`. All leaf fields are ingested as strings in Bronze to guarantee that unexpected format shifts never break the raw ingestion layer.
+The schema is defined explicitly in [`00_config_helpers.py`](notebooks/00_config_helpers.py) using PySpark `StructType` and `StructField`. All leaf fields are ingested as strings in Bronze to guarantee that unexpected format shifts never break the raw ingestion layer.
 
 ### 2. Schema Drift Handling
 - **Discovery**: In `01_raw_to_bronze.py`, the function `discover_new_keys()` inspects incoming JSON keys without triggering schema inference.
